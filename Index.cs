@@ -9,7 +9,7 @@ using UnityEngine.InputSystem;
 
 namespace ShopIndex
 {
-    [BepInPlugin("kx.shopindex", "Shop Index", "3.0.0")]
+    [BepInPlugin("kx.shopindex", "Shop Index", "3.0.1")]
     public sealed class Index : BaseUnityPlugin
     {
         private const int WindowId = 72841;
