@@ -16,7 +16,6 @@ namespace ShopIndex
         private readonly List<Item> entries = new List<Item>();
         private readonly List<Item> filteredEntries = new List<Item>();
         private readonly List<string> categories = new List<string>();
-        private readonly HashSet<string> cart = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         private Rect windowRect = new Rect(70f, 35f, 760f, 700f);
         private Vector2 scrollPosition;
         private string searchText = string.Empty;
@@ -81,7 +80,7 @@ namespace ShopIndex
             {
                 showFilters = !showFilters;
             }
-            string indexButtonText = showCart ? "INDEX" : "CART (" + cart.Count + ")";
+            string indexButtonText = showCart ? "INDEX" : "CART (" + GetCartCount() + ")";
             if (GUILayout.Button(indexButtonText, GUILayout.Width(100f), GUILayout.Height(24f)))
             {
                 showCart = !showCart;
@@ -183,22 +182,22 @@ namespace ShopIndex
             GUI.Label(new Rect(cardRect.x + 8f, cardRect.y + 105f, cardRect.width - 16f, 30f), entry.DisplayName);
             GUI.Label(new Rect(cardRect.x + 8f, cardRect.y + 139f, cardRect.width - 16f, 18f), entry.Category + "   " + entry.Cost);
             Rect buttonRect = new Rect(cardRect.x + 8f, cardRect.yMax - 34f, cardRect.width - 16f, 26f);
-            if (cart.Contains(entry.Id))
+            if (IsInCart(entry))
             {
                 if (GUI.Button(buttonRect, "Remove"))
                 {
-                    cart.Remove(entry.Id);
+                    RemoveFromCart(entry);
                 }
             }
             else if (GUI.Button(buttonRect, "Add to cart"))
             {
-                cart.Add(entry.Id);
+                AddToCart(entry);
             }
         }
 
         private void DrawCart()
         {
-            if (cart.Count == 0)
+            if (GetCartCount() == 0)
             {
                 GUILayout.Label("Your cart is empty.");
                 return;
@@ -207,7 +206,7 @@ namespace ShopIndex
             scrollPosition = GUILayout.BeginScrollView(scrollPosition);
             foreach (Item entry in entries)
             {
-                if (!cart.Contains(entry.Id))
+                if (!IsInCart(entry))
                 {
                     continue;
                 }
@@ -221,11 +220,133 @@ namespace ShopIndex
                 GUILayout.FlexibleSpace();
                 if (GUILayout.Button("Remove", GUILayout.Width(70f)))
                 {
-                    cart.Remove(entry.Id);
+                    RemoveFromCart(entry);
                 }
                 GUILayout.EndHorizontal();
             }
             GUILayout.EndScrollView();
+        }
+
+        private int GetCartCount()
+        {
+            IList currentCart = GetCurrentCart();
+            return currentCart == null ? 0 : currentCart.Count;
+        }
+
+        private bool IsInCart(Item entry)
+        {
+            IList currentCart = GetCurrentCart();
+            if (currentCart == null)
+            {
+                return false;
+            }
+
+            foreach (object cartItem in currentCart)
+            {
+                if (string.Equals(GetItemId(cartItem), entry.Id, StringComparison.OrdinalIgnoreCase))
+                {
+                    return true;
+                }
+            }
+            return false;
+        }
+
+        private void AddToCart(Item entry)
+        {
+            IList currentCart = GetCurrentCart();
+            if (currentCart == null)
+            {
+                Logger.LogWarning("[SI] Cannot add item to cart: currentCart is unavailable.");
+                return;
+            }
+            if (!IsInCart(entry))
+            {
+                currentCart.Add(entry.Source);
+                UpdateShoppingCart();
+                Logger.LogInfo("[SI] Added item to Gorilla Tag cart: " + entry.Id + " (" + currentCart.Count + " items)");
+            }
+        }
+
+        private void RemoveFromCart(Item entry)
+        {
+            IList currentCart = GetCurrentCart();
+            if (currentCart == null)
+            {
+                return;
+            }
+            for (int index = currentCart.Count - 1; index >= 0; index--)
+            {
+                if (!string.Equals(GetItemId(currentCart[index]), entry.Id, StringComparison.OrdinalIgnoreCase))
+                {
+                    continue;
+                }
+
+                currentCart.RemoveAt(index);
+                UpdateShoppingCart();
+                Logger.LogInfo("[SI] Removed item from Gorilla Tag cart: " + entry.Id + " (" + currentCart.Count + " items)");
+                break;
+            }
+        }
+
+        private static string GetItemId(object item)
+        {
+            if (item == null)
+            {
+                return null;
+            }
+
+            return ReadMember<string>(item.GetType(), item, "itemName");
+        }
+
+        private IList GetCurrentCart()
+        {
+            Type controllerType = Type.GetType("GorillaNetworking.CosmeticsController, Assembly-CSharp");
+            if (controllerType == null)
+            {
+                return null;
+            }
+            object controller = GetController(controllerType);
+            if (controller == null)
+            {
+                return null;
+            }
+            return ReadMember<IList>(controllerType, controller, "currentCart");
+        }
+
+        private void UpdateShoppingCart()
+        {
+            Type controllerType = Type.GetType("GorillaNetworking.CosmeticsController, Assembly-CSharp");
+            object controller = controllerType == null ? null : GetController(controllerType);
+            if (controller != null)
+            {
+                controllerType.GetMethod("UpdateShoppingCart", InstanceMembers)?.Invoke(controller, null);
+            }
+        }
+
+        private static object GetController(Type controllerType)
+        {
+            FieldInfo field = controllerType.GetField("instance", StaticMembers);
+            if (field != null)
+            {
+                return field.GetValue(null);
+            }
+
+            PropertyInfo property = controllerType.GetProperty("instance", StaticMembers);
+            return property?.GetValue(null, null);
+        }
+
+        private static T ReadMember<T>(Type type, object instance, string memberName)
+        {
+            FieldInfo field = type.GetField(memberName, InstanceMembers);
+            if (field != null)
+            {
+                object fieldValue = field.GetValue(instance);
+                return fieldValue is T typedFieldValue ? typedFieldValue : default(T);
+            }
+
+            PropertyInfo property = type.GetProperty(memberName, InstanceMembers);
+            object propertyValue = property?.GetValue(instance, null);
+            return propertyValue is T typedPropertyValue ? typedPropertyValue : default(T);
         }
 
         private void DrawSprite(Sprite sprite, Rect destination)
@@ -290,12 +411,12 @@ namespace ShopIndex
             {
                 return;
             }
-            object controller = controllerType.GetField("instance", StaticMembers)?.GetValue(null) ?? FindFirstObjectByType(controllerType);
+            object controller = GetController(controllerType) ?? FindFirstObjectByType(controllerType);
             if (controller == null)
             {
                 return;
             }
-            IEnumerable items = controllerType.GetProperty("allCosmetics", InstanceMembers)?.GetValue(controller, null) as IEnumerable;
+            IEnumerable items = ReadMember<IEnumerable>(controllerType, controller, "allCosmetics");
             if (items == null)
             {
                 return;
@@ -323,12 +444,12 @@ namespace ShopIndex
             {
                 selectedCategory = "All";
             }
-            cart.RemoveWhere(id => !entries.Any(entry => entry.Id == id));
             filtersDirty = true;
         }
 
         private sealed class Item
         {
+            public object Source;
             public string Id;
             public string DisplayName;
             public string Category;
@@ -361,6 +482,7 @@ namespace ShopIndex
                 string categoryName = category == null ? "Unknown" : category.ToString();
                 return new Item
                 {
+                    Source = item,
                     Id = id,
                     DisplayName = displayName,
                     Category = categoryName,
