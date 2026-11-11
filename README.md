@@ -1,10 +1,10 @@
 ## Shop Index
 
-A mod that lets you view the current avalable cosmetics in Gorilla Tag.
+A mod that lets you view the current available cosmetics in Gorilla Tag.
 
 ## How to use it
 
-Press ``F8`` to open the UI.
+Press ``F8`` to open the UI. You can change the key in the About tab.
 
 ## Special Thanks
 
