@@ -7,8 +7,10 @@ using System.Reflection;
 using System.Runtime.Serialization;
 using System.Runtime.Serialization.Json;
 using BepInEx;
+using BepInEx.Configuration;
 using UnityEngine;
 using UnityEngine.InputSystem;
+using UnityEngine.InputSystem.Controls;
 using UnityEngine.Networking;
 
 namespace ShopIndex
@@ -34,11 +36,20 @@ namespace ShopIndex
             About
         }
 
-        private const string Version = "3.4.2";
+        private const string Version = "4.0.0";
         private const string RepositoryUrl = "https://github.com/kx5qz/ShopIndex";
         private const float WindowPadding = 10f;
         private const float RowHeight = 20f;
+        private const float HeaderHeight = 28f;
+        private const float TabHeight = 22f;
+        private const float ContentTop = 64f;
         private const int OutfitColumns = 7;
+        private static readonly Color Accent = new Color(0.55f, 0.8f, 1f);
+        private static readonly Color Good = new Color(0.5f, 1f, 0.5f);
+        private static readonly Color Bad = new Color(1f, 0.5f, 0.5f);
+        private static readonly Color Muted = new Color(0.7f, 0.7f, 0.7f);
+        private static readonly Color StageColor = new Color(0f, 0f, 0f, 0.22f);
+        private static readonly Color LineColor = new Color(1f, 1f, 1f, 0.1f);
         private static readonly string[] OutfitSquareLabels =
         {
             "Hat", "Face", "Badge", "Chest", "Shirt", "Pants", "Fur",
@@ -102,23 +113,56 @@ namespace ShopIndex
         private bool windowDragging;
         private Vector2 windowDragOffset;
         private bool filtersDirty = true;
-        private string bundleCatalogStatus = "Waiting for Gorilla Tag's bundle catalog.";
+        private string bundleCatalogStatus = "Waiting on the bundle list...";
         private Sprite earlyAccessDlcSprite;
         private bool earlyAccessDlcImageRequested;
         private bool steamDlcAvailable;
         private bool steamDlcIsFree;
-        private string steamDlcPriceText = "Checking Steam...";
+        private string steamDlcPriceText = "Checking...";
         private string steamDlcLastError = string.Empty;
         private float nextRefreshTime;
+        private bool stylesReady;
         private GUIStyle titleLabelStyle;
+        private GUIStyle balanceStyle;
+        private GUIStyle aboutTitleStyle;
         private GUIStyle mutedLabelStyle;
+        private GUIStyle smallMutedStyle;
+        private GUIStyle centerMutedStyle;
+        private GUIStyle sectionLabelStyle;
+        private GUIStyle sectionTitleStyle;
+        private GUIStyle footerLabelStyle;
+        private GUIStyle statusLabelStyle;
         private GUIStyle slotLabelStyle;
+        private GUIStyle slotActiveLabelStyle;
+        private GUIStyle slotCaptionStyle;
+        private GUIStyle overlayLabelStyle;
+        private GUIStyle cardNameStyle;
+        private GUIStyle rowNameStyle;
+        private GUIStyle priceStyle;
+        private readonly GUIContent measureContent = new GUIContent();
         private GUIStyle tileNameStyle;
         private GUIStyle tileButtonStyle;
+        private GUIStyle tooltipStyle;
+        private ConfigEntry<float> windowXConfig;
+        private ConfigEntry<float> windowYConfig;
+        private ConfigEntry<Key> openKeyConfig;
+        private Keyboard openKeyKeyboard;
+        private Key openKeyResolved;
+        private KeyControl openKeyControl;
+        private bool rebindingOpenKey;
+        private bool windowPlaced;
+        private bool textFieldFocused;
         private string lastDrawError;
 
         private static readonly BindingFlags InstanceMembers = BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic;
         private static readonly BindingFlags StaticMembers = BindingFlags.Static | BindingFlags.Public | BindingFlags.NonPublic;
+
+        private void Awake()
+        {
+            windowXConfig = Config.Bind("Window", "X", -1f, "Horizontal position of the ShopIndex window. -1 puts it in the middle of the screen.");
+            windowYConfig = Config.Bind("Window", "Y", -1f, "Vertical position of the ShopIndex window. -1 puts it in the middle of the screen.");
+            openKeyConfig = Config.Bind("Controls", "OpenKey", Key.F8, "Key that opens and closes the menu. You can also change it in the About tab.");
+        }
 
         private void Start()
         {
@@ -127,12 +171,27 @@ namespace ShopIndex
 
         private void Update()
         {
-            if (Keyboard.current != null && Keyboard.current.f8Key.wasPressedThisFrame)
+            if (rebindingOpenKey && (!menuOpen || page != Page.About))
             {
-                menuOpen = !menuOpen;
-                if (menuOpen)
+                rebindingOpenKey = false;
+            }
+
+            Keyboard keyboard = Keyboard.current;
+            if (keyboard != null)
+            {
+                if (rebindingOpenKey)
                 {
-                    RefreshEntries();
+                    CaptureOpenKey(keyboard);
+                }
+                else if (OpenKeyPressed(keyboard))
+                {
+                    menuOpen = !menuOpen;
+                    GUIUtility.keyboardControl = 0;
+                    textFieldFocused = false;
+                    if (menuOpen)
+                    {
+                        RefreshEntries();
+                    }
                 }
             }
 
@@ -147,12 +206,62 @@ namespace ShopIndex
             }
         }
 
+        private bool OpenKeyPressed(Keyboard keyboard)
+        {
+            Key key = openKeyConfig.Value;
+            if (openKeyControl == null || keyboard != openKeyKeyboard || key != openKeyResolved)
+            {
+                openKeyControl = keyboard.allKeys.FirstOrDefault(control => control != null && control.keyCode == key) ?? keyboard.f8Key;
+                openKeyKeyboard = keyboard;
+                openKeyResolved = key;
+            }
+
+            if (!openKeyControl.wasPressedThisFrame)
+            {
+                return false;
+            }
+
+            Key pressed = openKeyControl.keyCode;
+            bool functionKey = pressed >= Key.F1 && pressed <= Key.F12;
+            return functionKey || !(menuOpen && textFieldFocused);
+        }
+
+        private void CaptureOpenKey(Keyboard keyboard)
+        {
+            if (keyboard.escapeKey.wasPressedThisFrame)
+            {
+                rebindingOpenKey = false;
+                return;
+            }
+
+            foreach (KeyControl control in keyboard.allKeys)
+            {
+                if (control != null && control.wasPressedThisFrame)
+                {
+                    openKeyConfig.Value = control.keyCode;
+                    rebindingOpenKey = false;
+                    return;
+                }
+            }
+        }
+
+        private string GetOpenKeyName()
+        {
+            if (openKeyControl != null && openKeyControl.keyCode == openKeyConfig.Value && !string.IsNullOrEmpty(openKeyControl.displayName))
+            {
+                return openKeyControl.displayName;
+            }
+            return openKeyConfig.Value.ToString();
+        }
+
         private void OnGUI()
         {
             if (!menuOpen)
             {
                 return;
             }
+
+            textFieldFocused = GUIUtility.keyboardControl != 0;
 
             if (Event.current.type == EventType.Layout)
             {
@@ -164,10 +273,14 @@ namespace ShopIndex
                 }
             }
 
-            if (titleLabelStyle == null)
+            EnsureStyles();
+
+            if (!windowPlaced)
             {
-                titleLabelStyle = new GUIStyle(GUI.skin.label);
-                titleLabelStyle.alignment = TextAnchor.MiddleCenter;
+                windowPlaced = true;
+                bool hasSavedPosition = windowXConfig.Value >= 0f && windowYConfig.Value >= 0f;
+                windowRect.x = hasSavedPosition ? windowXConfig.Value : (Screen.width - windowRect.width) / 2f;
+                windowRect.y = hasSavedPosition ? windowYConfig.Value : (Screen.height - windowRect.height) / 2f;
             }
 
             windowRect.x = Mathf.Clamp(windowRect.x, 0f, Mathf.Max(0f, Screen.width - windowRect.width));
@@ -175,7 +288,7 @@ namespace ShopIndex
             HandleWindowDrag();
 
             Color previousSelectionColor = GUI.skin.settings.selectionColor;
-            GUI.skin.settings.selectionColor = new Color(0.55f, 0.8f, 1f, 0.6f);
+            GUI.skin.settings.selectionColor = new Color(Accent.r, Accent.g, Accent.b, 0.6f);
             try
             {
                 DrawWindow();
@@ -188,49 +301,63 @@ namespace ShopIndex
 
         private void DrawWindow()
         {
+            Fill(new Rect(windowRect.x + 1f, windowRect.y + 1f, windowRect.width - 2f, windowRect.height - 2f), new Color(0f, 0f, 0f, 0.4f));
             GUI.Box(windowRect, GUIContent.none);
-            GUI.Label(new Rect(windowRect.x, windowRect.y + 5f, windowRect.width, RowHeight), "ShopIndex", titleLabelStyle);
+            Fill(new Rect(windowRect.x + 1f, windowRect.y + 1f, windowRect.width - 2f, HeaderHeight - 1f), new Color(0f, 0f, 0f, 0.3f));
+            Fill(new Rect(windowRect.x + 1f, windowRect.y + HeaderHeight, windowRect.width - 2f, 1f), LineColor);
+
+            GUI.Label(new Rect(windowRect.x, windowRect.y + 4f, windowRect.width, RowHeight), "ShopIndex", titleLabelStyle);
             GUI.Label(
-                new Rect(windowRect.x + 10f, windowRect.y + 5f, 200f, RowHeight),
-                new GUIContent("Shiny Rocks: " + (shinyRocks < 0 ? "..." : shinyRocks.ToString()), "Your current Shiny Rock balance"));
+                new Rect(windowRect.x + 10f, windowRect.y + 4f, 220f, RowHeight),
+                new GUIContent(
+                    "<color=#B3B3B3>Shiny Rocks</color>  <color=#8CCCFF>" + (shinyRocks < 0 ? "..." : shinyRocks.ToString()) + "</color>",
+                    "How many Shiny Rocks you have"),
+                balanceStyle);
 
             SafeDraw(DrawPage);
 
             Color previousBackground = GUI.backgroundColor;
             GUI.backgroundColor = new Color(0.9f, 0.08f, 0.08f, 1f);
-            if (GUI.Button(new Rect(windowRect.xMax - 25f, windowRect.y + 5f, 20f, 20f), new GUIContent("X", "Close (F8)")))
+            if (GUI.Button(new Rect(windowRect.xMax - 25f, windowRect.y + 4f, 20f, 20f), new GUIContent("X", "Close (" + GetOpenKeyName() + ")")))
             {
                 menuOpen = false;
+                GUIUtility.keyboardControl = 0;
             }
             GUI.backgroundColor = previousBackground;
 
             DrawTooltip();
+
+            if (Event.current.type == EventType.MouseDown && windowRect.Contains(Event.current.mousePosition))
+            {
+                GUIUtility.keyboardControl = 0;
+            }
         }
 
         private void DrawPage()
         {
             GUIContent[] tabs =
             {
-                new GUIContent("Index", "Browse every cosmetic for sale"),
-                new GUIContent("Rig", "Your name, color and cosmetics"),
-                new GUIContent("Cart (" + GetCartCount() + ")", "Items in your Gorilla Tag cart"),
-                new GUIContent("DLCs", "Bundles and Steam DLC"),
-                new GUIContent("About", "Credits and version info")
+                new GUIContent("Index", "Everything in the shop"),
+                new GUIContent("Rig", "Your name, color and fit"),
+                new GUIContent("Cart (" + GetCartCount() + ")", "Stuff in your cart"),
+                new GUIContent("DLCs", "Bundles and DLC"),
+                new GUIContent("About", "Credits and the menu key")
             };
 
             const float tabGap = 4f;
             float tabWidth = (windowRect.width - 10f - tabGap * (tabs.Length - 1)) / tabs.Length;
             for (int index = 0; index < tabs.Length; index++)
             {
-                Rect tabRect = new Rect(windowRect.x + 5f + index * (tabWidth + tabGap), windowRect.y + 30f, tabWidth, RowHeight);
+                Rect tabRect = new Rect(windowRect.x + 5f + index * (tabWidth + tabGap), windowRect.y + HeaderHeight + 5f, tabWidth, TabHeight);
+                bool current = page == (Page)index;
                 Color previousBackground = GUI.backgroundColor;
                 if ((Page)index == Page.Dlcs)
                 {
                     GUI.backgroundColor = new Color(0.15f, 1f, 0.05f, 1f);
                 }
-                bool selected = GUI.Toggle(tabRect, page == (Page)index, tabs[index], GUI.skin.button);
+                bool selected = GUI.Toggle(tabRect, current, tabs[index], GUI.skin.button);
                 GUI.backgroundColor = previousBackground;
-                if (selected && page != (Page)index)
+                if (selected && !current)
                 {
                     page = (Page)index;
                     scrollPosition = Vector2.zero;
@@ -239,10 +366,12 @@ namespace ShopIndex
             }
 
             float left = windowRect.x + WindowPadding;
-            float top = windowRect.y + WindowPadding + 50f;
+            float top = windowRect.y + ContentTop;
             float width = windowRect.width - WindowPadding * 2f;
-            float bottom = windowRect.yMax - 35f;
+            float bottom = windowRect.yMax - 37f;
             float footerY = windowRect.yMax - 25f;
+
+            Fill(new Rect(windowRect.x + 1f, windowRect.yMax - 31f, windowRect.width - 2f, 1f), LineColor);
 
             string footerText = null;
             switch (page)
@@ -251,22 +380,21 @@ namespace ShopIndex
                 case Page.Dlcs:
                     float listTop = DrawFilters(left, top, width);
                     DrawCatalog(new Rect(left, listTop, width, bottom - listTop));
-                    footerText = filteredEntries.Count + " items";
+                    footerText = CountLabel(filteredEntries.Count, page == Page.Dlcs ? "bundle" : "item");
                     break;
                 case Page.Rig:
-                    EnsureRigStyles();
                     float rigTop = DrawProfileBar(left, top, width);
                     rigTop = DrawOutfit(left, rigTop, width);
                     rigTop = DrawWardrobeHeader(left, rigTop, width);
                     DrawCatalog(new Rect(left, rigTop, width, bottom - rigTop));
-                    footerText = filteredEntries.Count + " items, " + wornIds.Count + " equipped";
+                    footerText = CountLabel(filteredEntries.Count, "item") + ", " + wornIds.Count + " equipped";
                     break;
                 case Page.Cart:
                     DrawCart(new Rect(left, top, width, bottom - top));
-                    footerText = GetCartCount() + " in cart, " + GetCartTotal().ToString() + " SR total";
+                    footerText = CountLabel(GetCartCount(), "item") + " in cart";
                     bool previousCartEnabled = GUI.enabled;
                     GUI.enabled = previousCartEnabled && GetCartCount() > 0 && purchasingEntry == null;
-                    if (GUI.Button(new Rect(windowRect.xMax - 190f, footerY, 100f, RowHeight), new GUIContent("Clear cart", "Empty your Gorilla Tag cart")))
+                    if (GUI.Button(new Rect(windowRect.xMax - 190f, footerY, 100f, RowHeight), new GUIContent("Clear cart", "Empty your cart")))
                     {
                         ClearCart();
                     }
@@ -279,51 +407,69 @@ namespace ShopIndex
 
             if (footerText != null)
             {
-                GUI.Label(new Rect(left, footerY, width - 200f, RowHeight), Time.unscaledTime < statusUntil ? statusText : footerText);
+                bool showingStatus = Time.unscaledTime < statusUntil;
+                float footerWidth = width - (page == Page.Cart ? 200f : 90f);
+                GUI.Label(new Rect(left, footerY, footerWidth, RowHeight), showingStatus ? statusText : footerText, showingStatus ? statusLabelStyle : footerLabelStyle);
             }
 
-            if (GUI.Button(new Rect(windowRect.xMax - 80f, footerY, 75f, RowHeight), new GUIContent("Refresh", "Reload the store catalog")))
+            if (GUI.Button(new Rect(windowRect.xMax - 80f, footerY, 75f, RowHeight), new GUIContent("Refresh", "Reload the shop")))
             {
                 RefreshEntries();
             }
         }
 
+        private static string CountLabel(int count, string noun)
+        {
+            return count + " " + noun + (count == 1 ? string.Empty : "s");
+        }
+
         private float DrawFilters(float left, float top, float width)
         {
-            const float labelWidth = 60f;
+            const float resetWidth = 74f;
+            bool bundles = page == Page.Dlcs;
 
-            GUI.Label(new Rect(left, top, labelWidth, RowHeight), "Search");
-            string oldSearch = searchText;
-            searchText = GUI.TextField(new Rect(left + labelWidth, top, width - labelWidth - 85f, RowHeight), searchText);
-            if (!string.Equals(oldSearch, searchText, StringComparison.Ordinal))
+            Rect bar = new Rect(left, top, width, bundles ? 30f : 55f);
+            GUI.Box(bar, GUIContent.none);
+            float x = bar.x + 8f;
+            float y = bar.y + 5f;
+            float right = bar.xMax - 8f;
+
+            string newSearch = DrawSearchField(
+                new Rect(x, y, right - x - resetWidth - 6f, RowHeight), "IndexSearch", searchText, bundles ? "search bundles..." : "search items...");
+            if (!string.Equals(newSearch, searchText, StringComparison.Ordinal))
             {
+                searchText = newSearch;
+                scrollPosition = Vector2.zero;
                 filtersDirty = true;
             }
-            if (GUI.Button(new Rect(left + width - 80f, top, 80f, RowHeight), new GUIContent("Reset", "Clear search and every filter")))
+            if (GUI.Button(new Rect(right - resetWidth, y, resetWidth, RowHeight), new GUIContent("Reset", "Clear the search and filters")))
             {
                 ResetFilters();
             }
-            top += 25f;
 
-            if (page == Page.Dlcs)
+            if (bundles)
             {
-                return top + 5f;
+                return bar.yMax + 8f;
             }
 
-            GUI.Label(new Rect(left, top, labelWidth, RowHeight), "Category");
-            if (GUI.Button(new Rect(left + labelWidth, top, 120f, RowHeight), new GUIContent(selectedCategory, "Click to cycle through cosmetic slots")))
+            y += 25f;
+            GUI.Label(new Rect(x, y, 58f, RowHeight), "Category", mutedLabelStyle);
+            if (GUI.Button(new Rect(x + 58f, y, 110f, RowHeight), new GUIContent(selectedCategory, "Click for the next one, right click to go back")))
             {
                 int categoryIndex = categories.FindIndex(category => string.Equals(category, selectedCategory, StringComparison.OrdinalIgnoreCase));
-                selectedCategory = categories.Count == 0 ? "All" : categories[(categoryIndex + 1) % categories.Count];
+                int step = Event.current.button == 1 ? -1 : 1;
+                selectedCategory = categories.Count == 0
+                    ? "All"
+                    : categories[((categoryIndex + step) % categories.Count + categories.Count) % categories.Count];
                 scrollPosition = Vector2.zero;
                 filtersDirty = true;
             }
 
-            DrawSortButton(left + 190f, top, 140f);
+            DrawSortButton(x + 178f, y, 130f);
 
-            bool newOwnedOnly = GUI.Toggle(new Rect(left + 375f, top, 70f, RowHeight), ownedOnly, new GUIContent("Owned", "Show the items you own (they're hidden otherwise)"));
-            bool newFreeOnly = GUI.Toggle(new Rect(left + 450f, top, 85f, RowHeight), freeOnly, new GUIContent("Free only", "Only show items that cost 0 Shiny Rocks"));
-            bool newAffordableOnly = GUI.Toggle(new Rect(left + 540f, top, width - 540f, RowHeight), affordableOnly, new GUIContent("Can afford", "Only show items you have enough Shiny Rocks for"));
+            bool newOwnedOnly = GUI.Toggle(new Rect(x + 350f, y, 70f, RowHeight), ownedOnly, new GUIContent("Owned", "Show stuff you already own (hidden otherwise)"));
+            bool newFreeOnly = GUI.Toggle(new Rect(x + 422f, y, 84f, RowHeight), freeOnly, new GUIContent("Free only", "Only free stuff"));
+            bool newAffordableOnly = GUI.Toggle(new Rect(x + 508f, y, right - (x + 508f), RowHeight), affordableOnly, new GUIContent("Can afford", "Only stuff you can afford"));
             if (newOwnedOnly != ownedOnly || newFreeOnly != freeOnly || newAffordableOnly != affordableOnly)
             {
                 ownedOnly = newOwnedOnly;
@@ -332,39 +478,96 @@ namespace ShopIndex
                 scrollPosition = Vector2.zero;
                 filtersDirty = true;
             }
-            return top + 30f;
+            return bar.yMax + 8f;
         }
 
         private void DrawSortButton(float x, float y, float buttonWidth)
         {
-            GUI.Label(new Rect(x, y, 35f, RowHeight), "Sort");
-            if (GUI.Button(new Rect(x + 35f, y, buttonWidth, RowHeight), new GUIContent(GetSortLabel(), "Click to cycle through sort orders")))
+            GUI.Label(new Rect(x, y, 32f, RowHeight), "Sort", mutedLabelStyle);
+            if (GUI.Button(new Rect(x + 32f, y, buttonWidth, RowHeight), new GUIContent(GetSortLabel(), "Click for the next one, right click to go back")))
             {
-                entrySortMode = (EntrySortMode)(((int)entrySortMode + 1) % Enum.GetValues(typeof(EntrySortMode)).Length);
+                int modeCount = Enum.GetValues(typeof(EntrySortMode)).Length;
+                int step = Event.current.button == 1 ? -1 : 1;
+                entrySortMode = (EntrySortMode)(((int)entrySortMode + step + modeCount) % modeCount);
                 scrollPosition = Vector2.zero;
                 filtersDirty = true;
             }
         }
 
-        private void EnsureRigStyles()
+        private string DrawSearchField(Rect rect, string controlName, string text, string placeholder)
         {
-            if (mutedLabelStyle == null)
+            GUI.SetNextControlName(controlName);
+            string result = GUI.TextField(rect, text);
+            if (string.IsNullOrEmpty(result) && GUI.GetNameOfFocusedControl() != controlName)
             {
-                mutedLabelStyle = new GUIStyle(GUI.skin.label);
-                mutedLabelStyle.normal.textColor = new Color(0.7f, 0.7f, 0.7f);
-                slotLabelStyle = new GUIStyle(mutedLabelStyle);
-                slotLabelStyle.fontSize = 12;
-                slotLabelStyle.alignment = TextAnchor.MiddleCenter;
-                slotLabelStyle.wordWrap = true;
-                tileNameStyle = new GUIStyle(GUI.skin.label);
-                tileNameStyle.fontSize = 12;
-                tileNameStyle.alignment = TextAnchor.UpperCenter;
-                tileNameStyle.wordWrap = true;
-                tileNameStyle.clipping = TextClipping.Clip;
-                tileButtonStyle = new GUIStyle(GUI.skin.button);
-                tileButtonStyle.fontSize = 12;
-                tileButtonStyle.padding = new RectOffset(2, 2, 2, 2);
+                GUI.Label(new Rect(rect.x + 4f, rect.y, rect.width - 8f, rect.height), placeholder, mutedLabelStyle);
             }
+            return result;
+        }
+
+        private void EnsureStyles()
+        {
+            if (stylesReady)
+            {
+                return;
+            }
+
+            GUIStyle label = GUI.skin.label;
+
+            titleLabelStyle = new GUIStyle(label) { alignment = TextAnchor.MiddleCenter };
+            balanceStyle = new GUIStyle(label) { alignment = TextAnchor.MiddleLeft, richText = true, wordWrap = false };
+            aboutTitleStyle = new GUIStyle(label) { alignment = TextAnchor.MiddleCenter, fontSize = 20 };
+
+            mutedLabelStyle = new GUIStyle(label);
+            mutedLabelStyle.normal.textColor = Muted;
+            smallMutedStyle = new GUIStyle(mutedLabelStyle) { fontSize = 12, alignment = TextAnchor.MiddleLeft, wordWrap = false, clipping = TextClipping.Clip };
+            centerMutedStyle = new GUIStyle(mutedLabelStyle) { alignment = TextAnchor.MiddleCenter, wordWrap = true };
+            sectionLabelStyle = new GUIStyle(mutedLabelStyle) { fontSize = 11, alignment = TextAnchor.MiddleLeft, wordWrap = false };
+            footerLabelStyle = new GUIStyle(mutedLabelStyle) { alignment = TextAnchor.MiddleLeft, wordWrap = false, clipping = TextClipping.Clip };
+            statusLabelStyle = new GUIStyle(footerLabelStyle);
+            statusLabelStyle.normal.textColor = Accent;
+
+            slotLabelStyle = new GUIStyle(mutedLabelStyle) { fontSize = 12, alignment = TextAnchor.MiddleCenter, wordWrap = true };
+            slotActiveLabelStyle = new GUIStyle(slotLabelStyle);
+            slotActiveLabelStyle.normal.textColor = Accent;
+            slotCaptionStyle = new GUIStyle(label) { fontSize = 10, alignment = TextAnchor.MiddleCenter, wordWrap = false, clipping = TextClipping.Clip, padding = new RectOffset(0, 0, 0, 0) };
+            slotCaptionStyle.normal.textColor = new Color(0.9f, 0.9f, 0.9f);
+            overlayLabelStyle = new GUIStyle(label) { fontSize = 11, alignment = TextAnchor.MiddleCenter, wordWrap = true, padding = new RectOffset(0, 0, 0, 0) };
+            overlayLabelStyle.normal.textColor = Color.white;
+
+            sectionTitleStyle = new GUIStyle(label) { alignment = TextAnchor.MiddleLeft, wordWrap = false };
+            cardNameStyle = new GUIStyle(label) { alignment = TextAnchor.UpperLeft, wordWrap = true, clipping = TextClipping.Clip };
+            rowNameStyle = new GUIStyle(cardNameStyle) { alignment = TextAnchor.MiddleLeft, wordWrap = false };
+            priceStyle = new GUIStyle(label) { alignment = TextAnchor.MiddleRight, wordWrap = false };
+
+            tileNameStyle = new GUIStyle(label) { fontSize = 12, alignment = TextAnchor.UpperCenter, wordWrap = true, clipping = TextClipping.Clip };
+            tileButtonStyle = new GUIStyle(GUI.skin.button) { fontSize = 12, padding = new RectOffset(2, 2, 2, 2) };
+
+            tooltipStyle = new GUIStyle(GUI.skin.box) { fontSize = 12, alignment = TextAnchor.MiddleLeft, wordWrap = true, padding = new RectOffset(8, 8, 5, 5) };
+            tooltipStyle.normal.textColor = new Color(0.92f, 0.92f, 0.92f);
+
+            stylesReady = true;
+        }
+
+        private static void Fill(Rect rect, Color color)
+        {
+            if (Event.current.type != EventType.Repaint)
+            {
+                return;
+            }
+
+            Color previousColor = GUI.color;
+            GUI.color = color;
+            GUI.DrawTexture(rect, Texture2D.whiteTexture);
+            GUI.color = previousColor;
+        }
+
+        private static void ColoredLabel(Rect rect, string text, GUIStyle style, Color color)
+        {
+            Color previousColor = GUI.contentColor;
+            GUI.contentColor = color;
+            GUI.Label(rect, text, style);
+            GUI.contentColor = previousColor;
         }
 
         private float DrawProfileBar(float left, float top, float width)
@@ -381,13 +584,13 @@ namespace ShopIndex
 
             float x = bar.x + 8f;
             nameInput = GUI.TextField(new Rect(x, y, 140f, RowHeight), nameInput, 12);
-            if (GUI.Button(new Rect(x + 146f, y, buttonWidth, RowHeight), new GUIContent("Set name", "Current name: " + GetSavedName() + ". Letters and numbers, up to 12")))
+            if (GUI.Button(new Rect(x + 146f, y, buttonWidth, RowHeight), new GUIContent("Set name", "Your name right now: " + GetSavedName() + ". Letters and numbers, 12 max")))
             {
                 ApplyName();
             }
 
             x = bar.xMax - 8f - buttonWidth;
-            if (GUI.Button(new Rect(x, y, buttonWidth, RowHeight), new GUIContent("Set color", "Saves your color and shows it on your gorilla")))
+            if (GUI.Button(new Rect(x, y, buttonWidth, RowHeight), new GUIContent("Set color", "Saves your color and puts it on your gorilla")))
             {
                 ApplyColor();
             }
@@ -461,7 +664,7 @@ namespace ShopIndex
             if (tagger == null || updateTaggerColor == null)
             {
                 Logger.LogWarning("[SI] Cannot set color: GorillaTagger.UpdateColor is unavailable.");
-                ShowStatus("Your gorilla isn't loaded yet.");
+                ShowStatus("Your gorilla hasn't loaded yet");
                 return;
             }
 
@@ -485,7 +688,7 @@ namespace ShopIndex
                 ShowStatus("Couldn't set color: " + cause.Message);
                 return;
             }
-            ShowStatus("Color set to " + colorR + " " + colorG + " " + colorB + ".");
+            ShowStatus("Color set to " + colorR + " " + colorG + " " + colorB);
         }
 
         private static void SendColorToRoom(Type taggerType, object tagger, float red, float green, float blue)
@@ -514,12 +717,12 @@ namespace ShopIndex
             nameInput = name;
             if (name.Length == 0)
             {
-                ShowStatus("Names need at least one letter or number.");
+                ShowStatus("Name needs at least one letter or number");
                 return;
             }
             if (name == GetSavedName())
             {
-                ShowStatus("That's already your name.");
+                ShowStatus("That's already your name");
                 return;
             }
 
@@ -531,12 +734,12 @@ namespace ShopIndex
             if (computer == null || currentNameField == null || processName == null || keyType == null)
             {
                 Logger.LogWarning("[SI] Cannot set name: the Gorilla Tag computer is unavailable.");
-                ShowStatus("The Gorilla Tag computer isn't available right now.");
+                ShowStatus("Can't reach the computer right now");
                 return;
             }
             if (!ReadMember<bool>(computerType, computer, "NametagsEnabled"))
             {
-                ShowStatus("Nametags are turned off. Turn them on in the computer's NAME screen first.");
+                ShowStatus("Nametags are off, turn them on at the computer first");
                 return;
             }
 
@@ -552,7 +755,7 @@ namespace ShopIndex
                 ShowStatus("Couldn't set name: " + cause.Message);
                 return;
             }
-            ShowStatus("Checking " + name + " with Gorilla Tag's name filter...");
+            ShowStatus("Checking if " + name + " is allowed...");
         }
 
         private static object GetGorillaComputer(out Type computerType)
@@ -579,25 +782,61 @@ namespace ShopIndex
             statusUntil = Time.unscaledTime + seconds;
         }
 
+        private void ShowCartStatus(string text)
+        {
+            if (purchasingEntry == null)
+            {
+                ShowStatus(text, 3f);
+            }
+        }
+
         private void DrawAbout(Rect area, float footerY)
         {
-            GUI.Label(new Rect(area.x, area.y, area.width, RowHeight), "ShopIndex");
-            GUI.Label(new Rect(area.x, area.y + 20f, area.width, RowHeight), "v" + Version);
-            GUI.Label(new Rect(area.x, area.y + 40f, area.width, RowHeight), "(C) Copyright 2026 kx5qz / MIT License");
+            GUI.Label(new Rect(area.x, area.y + 6f, area.width, 32f), "ShopIndex", aboutTitleStyle);
+            GUI.Label(new Rect(area.x, area.y + 38f, area.width, RowHeight), "v" + Version, centerMutedStyle);
+            GUI.Label(new Rect(area.x, area.y + 56f, area.width, RowHeight), "(C) Copyright 2026 kx5qz / MIT License", centerMutedStyle);
 
-            GUI.TextArea(new Rect(area.x, area.y + 70f, area.width, area.height - 70f),
-                "Made by:\n" +
-                "- kx5qz\n\n" +
-                "Inspired by GorillaShop by the graze\n\n" +
-                "Controls:\n" +
-                "- F8 opens and closes this window\n" +
-                "- Drag the title bar to move it\n\n" +
-                RepositoryUrl);
+            Rect panel = new Rect(area.x, area.y + 88f, area.width, 280f);
+            GUI.Box(panel, GUIContent.none);
+            float x = panel.x + 14f;
+            float y = panel.y + 10f;
+            float width = panel.width - 28f;
+            y = DrawAboutSection(x, y, width, "made by", Color.white, "kx5qz");
+            y = DrawAboutSection(x, y, width, "inspired by", Color.white, "GorillaShop by the graze");
+            y = DrawAboutSection(x, y, width, "controls", Color.white,
+                "press " + GetOpenKeyName() + " to open or close this",
+                "drag the top bar to move it",
+                "right click category or sort to go back");
 
-            if (GUI.Button(new Rect(area.x, footerY, 150f, RowHeight), new GUIContent("Open GitHub", "Open the ShopIndex repository in your browser")))
+            GUI.Label(new Rect(x, y, width, 16f), "menu key", sectionLabelStyle);
+            y += 18f;
+            measureContent.text = rebindingOpenKey ? "..." : GetOpenKeyName();
+            float keyWidth = Mathf.Max(36f, GUI.skin.button.CalcSize(measureContent).x + 6f);
+            if (GUI.Button(new Rect(x, y, keyWidth, RowHeight), new GUIContent(measureContent.text, "Click it, then press the key you want")))
+            {
+                rebindingOpenKey = !rebindingOpenKey;
+            }
+            GUI.Label(new Rect(x + keyWidth + 8f, y, width - keyWidth - 8f, RowHeight), rebindingOpenKey ? "press a key, esc to cancel" : "click to change it", mutedLabelStyle);
+            y += 31f;
+
+            DrawAboutSection(x, y, width, "source", Accent, RepositoryUrl);
+
+            if (GUI.Button(new Rect(area.x, footerY, 150f, RowHeight), new GUIContent("Open GitHub", "Opens the GitHub page in your browser")))
             {
                 Application.OpenURL(RepositoryUrl);
             }
+        }
+
+        private float DrawAboutSection(float x, float y, float width, string heading, Color lineColor, params string[] lines)
+        {
+            GUI.Label(new Rect(x, y, width, 16f), heading, sectionLabelStyle);
+            y += 17f;
+            foreach (string line in lines)
+            {
+                ColoredLabel(new Rect(x, y, width, RowHeight), line, GUI.skin.label, lineColor);
+                y += 19f;
+            }
+            return y + 9f;
         }
 
         private void DrawTooltip()
@@ -607,15 +846,25 @@ namespace ShopIndex
                 return;
             }
 
+            const float maxWidth = 300f;
             GUIContent tooltip = new GUIContent(GUI.tooltip);
-            Vector2 size = GUI.skin.box.CalcSize(tooltip);
+            float width = Mathf.Min(tooltipStyle.CalcSize(tooltip).x + 2f, maxWidth);
+            float height = tooltipStyle.CalcHeight(tooltip, width);
             Vector2 mouse = Event.current.mousePosition;
-            Rect tooltipRect = new Rect(mouse.x + 10f, mouse.y, size.x + 10f, 25f);
-            if (tooltipRect.xMax > Mathf.Min(Screen.width, windowRect.xMax))
+            Rect tooltipRect = new Rect(mouse.x + 14f, mouse.y + 18f, width, height);
+            if (tooltipRect.xMax > Screen.width)
             {
-                tooltipRect.x = Mathf.Max(0f, mouse.x - 10f - tooltipRect.width);
+                tooltipRect.x = mouse.x - 8f - width;
             }
-            GUI.Box(tooltipRect, tooltip);
+            if (tooltipRect.yMax > Screen.height)
+            {
+                tooltipRect.y = mouse.y - 8f - height;
+            }
+            tooltipRect.x = Mathf.Max(0f, tooltipRect.x);
+            tooltipRect.y = Mathf.Max(0f, tooltipRect.y);
+
+            Fill(tooltipRect, new Color(0f, 0f, 0f, 0.85f));
+            GUI.Box(tooltipRect, tooltip, tooltipStyle);
 
             GUI.tooltip = string.Empty;
         }
@@ -634,21 +883,21 @@ namespace ShopIndex
                     Logger.LogError("[SI] Error while drawing UI: " + ex);
                 }
                 GUI.Label(
-                    new Rect(windowRect.x + WindowPadding, windowRect.y + WindowPadding + 50f, windowRect.width - WindowPadding * 2f, windowRect.height - 85f),
-                    "An error occurred while drawing the UI.\n\nMessage: " + ex.Message + "\n\n" + ex.StackTrace);
+                    new Rect(windowRect.x + WindowPadding, windowRect.y + ContentTop, windowRect.width - WindowPadding * 2f, windowRect.height - ContentTop - 37f),
+                    "Something broke while drawing the menu.\n\n" + ex.Message + "\n\n" + ex.StackTrace);
             }
         }
 
         private void HandleWindowDrag()
         {
-            const float titleBarHeight = 25f;
-            Rect dragRect = new Rect(windowRect.x, windowRect.y, windowRect.width - 30f, titleBarHeight);
+            Rect dragRect = new Rect(windowRect.x, windowRect.y, windowRect.width - 30f, HeaderHeight);
             Event currentEvent = Event.current;
 
             if (currentEvent.type == EventType.MouseDown && currentEvent.button == 0 && dragRect.Contains(currentEvent.mousePosition))
             {
                 windowDragging = true;
                 windowDragOffset = currentEvent.mousePosition - new Vector2(windowRect.x, windowRect.y);
+                GUIUtility.keyboardControl = 0;
                 currentEvent.Use();
             }
             else if (currentEvent.type == EventType.MouseDrag && windowDragging && currentEvent.button == 0)
@@ -659,9 +908,11 @@ namespace ShopIndex
                 windowRect.y = Mathf.Clamp(windowRect.y, 0f, Mathf.Max(0f, Screen.height - windowRect.height));
                 currentEvent.Use();
             }
-            else if (currentEvent.type == EventType.MouseUp && currentEvent.button == 0)
+            else if (currentEvent.rawType == EventType.MouseUp && currentEvent.button == 0 && windowDragging)
             {
                 windowDragging = false;
+                windowXConfig.Value = windowRect.x;
+                windowYConfig.Value = windowRect.y;
             }
         }
 
@@ -678,9 +929,9 @@ namespace ShopIndex
             if (filteredEntries.Count == 0)
             {
                 bool showingUnfilteredBundles = page == Page.Dlcs && string.IsNullOrWhiteSpace(searchText);
-                string message = entries.Count == 0 ? "Loading store items." :
-                    showingUnfilteredBundles && !string.IsNullOrWhiteSpace(bundleCatalogStatus) ? bundleCatalogStatus : "No matching items.";
-                GUI.Label(new Rect(viewport.x, viewport.y, viewport.width, RowHeight), message);
+                string message = entries.Count == 0 ? "Loading the shop..." :
+                    showingUnfilteredBundles && !string.IsNullOrWhiteSpace(bundleCatalogStatus) ? bundleCatalogStatus : "Nothing found";
+                GUI.Label(new Rect(viewport.x, viewport.y, viewport.width, Mathf.Min(viewport.height, 90f)), message, centerMutedStyle);
                 return;
             }
 
@@ -688,12 +939,18 @@ namespace ShopIndex
             float cardHeight = wardrobe ? 170f : 208f;
             float minimumCardWidth = wardrobe ? 130f : 154f;
             const float gap = 8f;
-            float usableWidth = Mathf.Max(220f, viewport.width - 20f);
+            float usableWidth = viewport.width;
             int columns = Mathf.Max(1, Mathf.FloorToInt((usableWidth + gap) / (minimumCardWidth + gap)));
-            float cardWidth = (usableWidth - gap * (columns - 1)) / columns;
             int rows = Mathf.CeilToInt(filteredEntries.Count / (float)columns);
+            if (rows * (cardHeight + gap) - gap > viewport.height)
+            {
+                usableWidth = viewport.width - 20f;
+                columns = Mathf.Max(1, Mathf.FloorToInt((usableWidth + gap) / (minimumCardWidth + gap)));
+                rows = Mathf.CeilToInt(filteredEntries.Count / (float)columns);
+            }
+            float cardWidth = (usableWidth - gap * (columns - 1)) / columns;
             float contentWidth = usableWidth;
-            float contentHeight = rows * (cardHeight + gap);
+            float contentHeight = rows * (cardHeight + gap) - gap;
             scrollPosition = GUI.BeginScrollView(viewport, scrollPosition, new Rect(0f, 0f, contentWidth, contentHeight));
 
             int firstRow = Mathf.Max(0, Mathf.FloorToInt(scrollPosition.y / (cardHeight + gap)) - 1);
@@ -723,16 +980,38 @@ namespace ShopIndex
 
         private void DrawCard(Item entry, Rect cardRect)
         {
+            bool inCart = !entry.IsBundle && IsInCart(entry);
+
             GUI.Box(cardRect, GUIContent.none);
-            Rect imageRect = new Rect(cardRect.x + 8f, cardRect.y + 8f, cardRect.width - 16f, 92f);
-            DrawSprite(entry.Sprite, imageRect);
-            GUI.Label(new Rect(cardRect.x + 8f, cardRect.y + 105f, cardRect.width - 16f, 30f), entry.DisplayName);
+
+            Rect stage = new Rect(cardRect.x + 8f, cardRect.y + 8f, cardRect.width - 16f, 92f);
+            Fill(stage, StageColor);
+            if (entry.Sprite == null)
+            {
+                GUI.Label(stage, "no picture", slotLabelStyle);
+            }
+            DrawSprite(entry.Sprite, new Rect(stage.x + 2f, stage.y + 2f, stage.width - 4f, stage.height - 4f));
+
+            GUI.Label(new Rect(cardRect.x + 8f, cardRect.y + 104f, cardRect.width - 16f, 34f), entry.DisplayName, cardNameStyle);
+
             string price = string.IsNullOrWhiteSpace(entry.DisplayPrice) ? FormatCost(entry) : entry.DisplayPrice;
             if (entry.IsBundle && !entry.CanPurchase)
             {
-                price = string.IsNullOrWhiteSpace(entry.DisplayPrice) ? "Price unavailable" : entry.DisplayPrice;
+                price = string.IsNullOrWhiteSpace(entry.DisplayPrice) ? "No price" : entry.DisplayPrice;
             }
-            GUI.Label(new Rect(cardRect.x + 8f, cardRect.y + 139f, cardRect.width - 16f, 18f), entry.Category + "   " + price);
+            Color priceColor = entry.IsOwned ? Muted :
+                entry.IsFree ? Good :
+                entry.IsBundle ? Color.white :
+                shinyRocks >= 0 && entry.Cost > shinyRocks ? Bad : Color.white;
+            Rect detailRect = new Rect(cardRect.x + 8f, cardRect.y + 142f, cardRect.width - 16f, 18f);
+            measureContent.text = price;
+            float categoryWidth = detailRect.width - priceStyle.CalcSize(measureContent).x - 6f;
+            measureContent.text = entry.IsSteamDlc ? "Steam DLC" : entry.Category;
+            if (smallMutedStyle.CalcSize(measureContent).x <= categoryWidth)
+            {
+                GUI.Label(new Rect(detailRect.x, detailRect.y, categoryWidth, detailRect.height), measureContent.text, smallMutedStyle);
+            }
+            ColoredLabel(detailRect, price, priceStyle, priceColor);
 
             Rect buttonRect = new Rect(cardRect.x + 8f, cardRect.yMax - 34f, cardRect.width - 16f, 26f);
             if (entry.IsBundle)
@@ -759,16 +1038,15 @@ namespace ShopIndex
             {
                 bool previousEnabled = GUI.enabled;
                 GUI.enabled = false;
-                GUI.Button(buttonRect, new GUIContent("OWNED", "You already own this item"));
+                GUI.Button(buttonRect, new GUIContent("OWNED", "You already own this"));
                 GUI.enabled = previousEnabled;
             }
             else
             {
                 float halfWidth = (buttonRect.width - 4f) / 2f;
-                bool inCart = IsInCart(entry);
                 GUIContent cartContent = inCart
-                    ? new GUIContent("REMOVE", "Remove from your Gorilla Tag cart")
-                    : new GUIContent("CART", "Add to your Gorilla Tag cart to try it on");
+                    ? new GUIContent("REMOVE", "Take it out of your cart")
+                    : new GUIContent("CART", "Add it to your cart to try it on");
                 if (GUI.Button(new Rect(buttonRect.x, buttonRect.y, halfWidth, buttonRect.height), cartContent))
                 {
                     if (inCart)
@@ -788,9 +1066,9 @@ namespace ShopIndex
         {
             bool canAfford = shinyRocks >= 0 && entry.Cost <= shinyRocks;
             bool confirming = confirmBuyId == entry.Id && Time.unscaledTime < confirmBuyUntil;
-            string tooltip = purchasingEntry != null ? "Another purchase is still going through" :
+            string tooltip = purchasingEntry != null ? "Hold on, something's still buying" :
                 !canAfford ? "You need " + (entry.Cost - Mathf.Max(0, shinyRocks)).ToString() + " more Shiny Rocks" :
-                confirming ? "Click again to buy for " + FormatCost(entry) + ". You'll have " + (shinyRocks - entry.Cost).ToString() + " left" :
+                confirming ? "Click again to buy for " + FormatCost(entry) + ", you'll have " + (shinyRocks - entry.Cost).ToString() + " left" :
                 "Buy for " + FormatCost(entry);
             string label = purchasingEntry != null && purchasingEntry.Id == entry.Id ? "BUYING..." :
                 confirming ? "U SURE?" :
@@ -829,13 +1107,13 @@ namespace ShopIndex
             if (controller == null || stageField == null || itemToBuyField == null || processStage == null || entry.Source == null)
             {
                 Logger.LogWarning("[SI] Cannot buy " + entry.Id + ": Gorilla Tag's checkout is unavailable.");
-                ShowStatus("Gorilla Tag's checkout isn't available right now.");
+                ShowStatus("Checkout isn't working right now");
                 return;
             }
 
             if (purchasingEntry != null || string.Equals(stageField.GetValue(controller)?.ToString(), "Buying", StringComparison.Ordinal))
             {
-                ShowStatus("Another purchase is still going through.");
+                ShowStatus("Hold on, something's still buying");
                 return;
             }
 
@@ -848,12 +1126,12 @@ namespace ShopIndex
                 string stage = stageField.GetValue(controller).ToString();
                 if (stage == "ItemOwned")
                 {
-                    ShowStatus("You already own " + entry.DisplayName + ".");
+                    ShowStatus("You already own " + entry.DisplayName);
                     return;
                 }
                 if (stage != "ItemSelected")
                 {
-                    ShowStatus("Not enough Shiny Rocks for " + entry.DisplayName + ".");
+                    ShowStatus("Not enough Shiny Rocks for " + entry.DisplayName);
                     return;
                 }
 
@@ -864,7 +1142,7 @@ namespace ShopIndex
             {
                 Exception cause = ex is TargetInvocationException && ex.InnerException != null ? ex.InnerException : ex;
                 Logger.LogWarning("[SI] Checkout failed for " + entry.Id + ": " + cause);
-                ShowStatus("Couldn't start the purchase: " + cause.Message);
+                ShowStatus("Couldn't buy it: " + cause.Message);
                 return;
             }
 
@@ -888,12 +1166,12 @@ namespace ShopIndex
             }
             else if (stage == "Failure")
             {
-                ShowStatus("Purchase failed. No Shiny Rocks were spent.");
+                ShowStatus("Didn't go through, no Shiny Rocks spent");
                 Logger.LogWarning("[SI] Purchase failed for cosmetic: " + purchasingEntry.Id);
             }
             else if (Time.unscaledTime - purchaseStartedAt > 30f)
             {
-                ShowStatus("Purchase is taking a while. Check the checkout screen in the shop.");
+                ShowStatus("Taking a while, check the checkout screen in the shop");
             }
             else
             {
@@ -923,6 +1201,8 @@ namespace ShopIndex
 
         private void DrawOutfitSquare(int square, Rect squareRect)
         {
+            const float captionHeight = 14f;
+
             int[] slots = OutfitSquareSlots[square];
             string label = OutfitSquareLabels[square];
             Item first = wornSlotEntries[slots[0]];
@@ -932,26 +1212,33 @@ namespace ShopIndex
                 second = null;
             }
 
+            Vector2 pointer = Event.current.mousePosition;
+            bool hovered = Event.current.type == EventType.Repaint && squareRect.Contains(pointer);
+
             Color previousBackground = GUI.backgroundColor;
             if (first != null || second != null)
             {
-                GUI.backgroundColor = new Color(0.55f, 0.8f, 1f);
+                GUI.backgroundColor = Accent;
             }
             GUI.Box(squareRect, GUIContent.none);
             GUI.backgroundColor = previousBackground;
+
+            Rect caption = new Rect(squareRect.x + 1f, squareRect.yMax - captionHeight - 1f, squareRect.width - 2f, captionHeight);
+            float pictureHeight = squareRect.height - captionHeight - 6f;
 
             if (first != null && second != null)
             {
                 float half = squareRect.width / 2f;
                 Rect leftHalf = new Rect(squareRect.x, squareRect.y, half, squareRect.height);
                 Rect rightHalf = new Rect(squareRect.x + half, squareRect.y, half, squareRect.height);
-                DrawSprite(first.Sprite, new Rect(leftHalf.x + 3f, leftHalf.y + 4f, leftHalf.width - 4f, leftHalf.height - 8f));
-                DrawSprite(second.Sprite, new Rect(rightHalf.x + 1f, rightHalf.y + 4f, rightHalf.width - 4f, rightHalf.height - 8f));
-
-                Color previousColor = GUI.color;
-                GUI.color = new Color(0f, 0f, 0f, 0.5f);
-                GUI.DrawTexture(new Rect(squareRect.x + half, squareRect.y + 4f, 1f, squareRect.height - 8f), Texture2D.whiteTexture);
-                GUI.color = previousColor;
+                DrawSprite(first.Sprite, new Rect(leftHalf.x + 3f, leftHalf.y + 4f, leftHalf.width - 4f, pictureHeight));
+                DrawSprite(second.Sprite, new Rect(rightHalf.x + 1f, rightHalf.y + 4f, rightHalf.width - 4f, pictureHeight));
+                Fill(new Rect(squareRect.x + half, squareRect.y + 4f, 1f, pictureHeight), new Color(0f, 0f, 0f, 0.5f));
+                DrawSlotCaption(caption, label);
+                if (hovered)
+                {
+                    DrawTakeOffHint(leftHalf.Contains(pointer) ? leftHalf : rightHalf);
+                }
 
                 DrawTakeOffButton(leftHalf, first, label + ", left");
                 DrawTakeOffButton(rightHalf, second, label + ", right");
@@ -961,19 +1248,39 @@ namespace ShopIndex
             Item worn = first ?? second;
             if (worn != null)
             {
-                DrawSprite(worn.Sprite, new Rect(squareRect.x + 4f, squareRect.y + 4f, squareRect.width - 8f, squareRect.height - 8f));
+                DrawSprite(worn.Sprite, new Rect(squareRect.x + 4f, squareRect.y + 4f, squareRect.width - 8f, pictureHeight));
+                DrawSlotCaption(caption, label);
+                if (hovered)
+                {
+                    DrawTakeOffHint(squareRect);
+                }
                 DrawTakeOffButton(squareRect, worn, label);
                 return;
             }
 
-            GUI.Label(squareRect, label, slotLabelStyle);
-            if (GUI.Button(squareRect, new GUIContent(string.Empty, label + " is empty. Click to browse"), GUIStyle.none))
+            string squareCategory = OutfitSquareCategories[square];
+            bool browsing = wardrobeCategory == squareCategory;
+            GUI.Label(squareRect, label, browsing ? slotActiveLabelStyle : slotLabelStyle);
+            string tooltip = browsing ? "Showing your " + label + " stuff, click to show everything" : label + " is empty, click to browse";
+            if (GUI.Button(squareRect, new GUIContent(string.Empty, tooltip), GUIStyle.none))
             {
-                string squareCategory = OutfitSquareCategories[square];
-                wardrobeCategory = wardrobeCategory == squareCategory ? "All" : squareCategory;
+                wardrobeCategory = browsing ? "All" : squareCategory;
                 scrollPosition = Vector2.zero;
                 filtersDirty = true;
             }
+        }
+
+        private void DrawSlotCaption(Rect caption, string label)
+        {
+            Fill(caption, new Color(0f, 0f, 0f, 0.45f));
+            GUI.Label(caption, label, slotCaptionStyle);
+        }
+
+        private void DrawTakeOffHint(Rect area)
+        {
+            Rect overlay = new Rect(area.x + 1f, area.y + 1f, area.width - 2f, area.height - 2f);
+            Fill(overlay, new Color(0f, 0f, 0f, 0.6f));
+            GUI.Label(overlay, "TAKE OFF", overlayLabelStyle);
         }
 
         private void DrawTakeOffButton(Rect area, Item worn, string where)
@@ -988,9 +1295,14 @@ namespace ShopIndex
         {
             const float searchWidth = 150f;
 
+            measureContent.text = "Wardrobe";
+            float titleWidth = sectionTitleStyle.CalcSize(measureContent).x;
+            GUI.Label(new Rect(left, top, titleWidth, RowHeight), "Wardrobe", sectionTitleStyle);
             if (wardrobeCategory != "All")
             {
-                if (GUI.Button(new Rect(left, top + 1f, 90f, RowHeight - 2f), new GUIContent(wardrobeCategory, "Click to show everything again"), tileButtonStyle))
+                measureContent.text = wardrobeCategory;
+                float filterWidth = Mathf.Max(50f, tileButtonStyle.CalcSize(measureContent).x + 14f);
+                if (GUI.Button(new Rect(left + titleWidth + 6f, top + 1f, filterWidth, RowHeight - 2f), new GUIContent(wardrobeCategory, "Click to show everything"), tileButtonStyle))
                 {
                     wardrobeCategory = "All";
                     scrollPosition = Vector2.zero;
@@ -998,33 +1310,33 @@ namespace ShopIndex
                 }
             }
 
-            Rect searchRect = new Rect(left + width - searchWidth, top, searchWidth, RowHeight);
-            string oldSearch = wardrobeSearchText;
-            GUI.SetNextControlName("WardrobeSearch");
-            wardrobeSearchText = GUI.TextField(searchRect, wardrobeSearchText);
-            if (!string.Equals(oldSearch, wardrobeSearchText, StringComparison.Ordinal))
+            string newSearch = DrawSearchField(new Rect(left + width - searchWidth, top, searchWidth, RowHeight), "WardrobeSearch", wardrobeSearchText, "search...");
+            if (!string.Equals(newSearch, wardrobeSearchText, StringComparison.Ordinal))
             {
+                wardrobeSearchText = newSearch;
+                scrollPosition = Vector2.zero;
                 filtersDirty = true;
-            }
-            if (string.IsNullOrEmpty(wardrobeSearchText) && GUI.GetNameOfFocusedControl() != "WardrobeSearch")
-            {
-                GUI.Label(new Rect(searchRect.x + 4f, searchRect.y, searchRect.width - 8f, searchRect.height), "search...", mutedLabelStyle);
             }
             return top + 26f;
         }
 
         private void DrawWardrobeTile(Item entry, Rect tileRect)
         {
+            const float iconSize = 84f;
+
+            bool worn = wornIds.Contains(entry.Id);
             Color previousBackground = GUI.backgroundColor;
-            if (wornIds.Contains(entry.Id))
+            if (worn)
             {
-                GUI.backgroundColor = new Color(0.55f, 0.8f, 1f);
+                GUI.backgroundColor = Accent;
             }
             GUI.Box(tileRect, GUIContent.none);
             GUI.backgroundColor = previousBackground;
 
-            const float iconSize = 84f;
+            Rect stage = new Rect(tileRect.x + 6f, tileRect.y + 6f, tileRect.width - 12f, iconSize + 4f);
+            Fill(stage, StageColor);
             DrawSprite(entry.Sprite, new Rect(tileRect.x + (tileRect.width - iconSize) / 2f, tileRect.y + 8f, iconSize, iconSize));
+
             GUI.Label(new Rect(tileRect.x + 4f, tileRect.y + iconSize + 14f, tileRect.width - 8f, 34f), new GUIContent(entry.DisplayName, entry.DisplayName + " (" + entry.Category + ")"), tileNameStyle);
             DrawEquipButtons(entry, new Rect(tileRect.x + 6f, tileRect.yMax - 30f, tileRect.width - 12f, 24f));
         }
@@ -1147,7 +1459,7 @@ namespace ShopIndex
             if (controller == null || entry.Source == null)
             {
                 Logger.LogWarning("[SI] Cannot equip " + entry.Id + ": CosmeticsController is unavailable.");
-                ShowStatus("Gorilla Tag's wardrobe isn't available right now.");
+                ShowStatus("Wardrobe isn't working right now");
                 return;
             }
 
@@ -1178,7 +1490,7 @@ namespace ShopIndex
             }
 
             RefreshWornSnapshot();
-            ShowStatus((wasEquipped ? "Took off " : "Put on ") + entry.DisplayName + ".");
+            ShowStatus((wasEquipped ? "Took off " : "Put on ") + entry.DisplayName);
         }
 
         private void Unequip(Type controllerType, object controller, Item entry)
@@ -1248,6 +1560,7 @@ namespace ShopIndex
             if (manager == null || provider == null)
             {
                 Logger.LogWarning("[SI] Cannot start bundle checkout for " + entry.Id + ": manager=" + (manager != null) + ", creatorCodeProvider=" + (provider != null));
+                ShowStatus("Can't buy bundles from this area");
                 return;
             }
 
@@ -1268,15 +1581,19 @@ namespace ShopIndex
                 {
                     method.Invoke(manager, new object[] { entry.Id, provider });
                     Logger.LogInfo("[SI] Started Gorilla Tag checkout for bundle: " + entry.Id);
+                    ShowStatus("Opening checkout for " + entry.DisplayName + "...");
                 }
                 catch (Exception ex)
                 {
-                    Logger.LogWarning("[SI] Bundle checkout failed for " + entry.Id + ": " + ex.Message);
+                    Exception cause = ex is TargetInvocationException && ex.InnerException != null ? ex.InnerException : ex;
+                    Logger.LogWarning("[SI] Bundle checkout failed for " + entry.Id + ": " + cause.Message);
+                    ShowStatus("Couldn't open the bundle checkout: " + cause.Message);
                 }
                 return;
             }
 
             Logger.LogWarning("[SI] Cannot start bundle checkout: BundlePurchaseButtonPressed was not found.");
+            ShowStatus("Bundle checkout isn't working right now");
         }
 
         private static object FindBundleCreatorCodeProvider(Item entry, Type providerType)
@@ -1352,39 +1669,75 @@ namespace ShopIndex
         {
             if (GetCartCount() == 0)
             {
-                GUI.Label(new Rect(area.x, area.y, area.width, RowHeight), "Your cart is empty.");
+                GUI.Label(
+                    new Rect(area.x, area.y, area.width, Mathf.Min(area.height, 90f)),
+                    "Your cart's empty.\nHit CART on something in the Index to try it on.",
+                    centerMutedStyle);
                 return;
             }
 
+            const float rowHeight = 64f;
+            const float rowGap = 6f;
+            const float summaryHeight = 30f;
+
+            Rect listRect = new Rect(area.x, area.y, area.width, area.height - summaryHeight - 8f);
+            float contentHeight = cartEntries.Count * (rowHeight + rowGap) - rowGap;
+            float contentWidth = contentHeight > listRect.height ? listRect.width - 20f : listRect.width;
             Item entryToRemove = null;
-            GUILayout.BeginArea(area);
-            scrollPosition = GUILayout.BeginScrollView(scrollPosition);
-            foreach (Item entry in cartEntries)
+            scrollPosition = GUI.BeginScrollView(listRect, scrollPosition, new Rect(0f, 0f, contentWidth, contentHeight));
+            for (int index = 0; index < cartEntries.Count; index++)
             {
-                GUILayout.BeginHorizontal(GUI.skin.box, GUILayout.Height(70f));
-                Rect imageRect = GUILayoutUtility.GetRect(58f, 54f, GUILayout.Width(58f));
-                DrawSprite(entry.Sprite, imageRect);
-                GUILayout.BeginVertical();
-                GUILayout.Label(entry.DisplayName);
-                GUILayout.Label(entry.Category + "   " + FormatCost(entry));
-                GUILayout.EndVertical();
-                GUILayout.FlexibleSpace();
+                Item entry = cartEntries[index];
+                Rect row = new Rect(0f, index * (rowHeight + rowGap), contentWidth, rowHeight);
+                GUI.Box(row, GUIContent.none);
+
+                Rect stage = new Rect(row.x + 6f, row.y + 6f, 52f, 52f);
+                Fill(stage, StageColor);
+                DrawSprite(entry.Sprite, new Rect(stage.x + 2f, stage.y + 2f, stage.width - 4f, stage.height - 4f));
+
+                float textWidth = row.width - 68f - 258f;
+                GUI.Label(new Rect(row.x + 68f, row.y + 11f, textWidth, RowHeight), entry.DisplayName, rowNameStyle);
+                GUI.Label(new Rect(row.x + 68f, row.y + 32f, textWidth, 18f), entry.Category, smallMutedStyle);
+
+                Color priceColor = entry.IsOwned ? Muted :
+                    entry.IsFree ? Good :
+                    shinyRocks >= 0 && entry.Cost > shinyRocks ? Bad : Color.white;
+                ColoredLabel(new Rect(row.xMax - 250f, row.y + 22f, 90f, RowHeight), FormatCost(entry), priceStyle, priceColor);
+
+                Rect buyRect = new Rect(row.xMax - 152f, row.y + 20f, 70f, 24f);
                 if (entry.IsOwned)
                 {
-                    GUILayout.Label("Owned", GUILayout.Width(70f));
+                    bool previousEnabled = GUI.enabled;
+                    GUI.enabled = false;
+                    GUI.Button(buyRect, new GUIContent("OWNED", "You already own this"));
+                    GUI.enabled = previousEnabled;
                 }
                 else
                 {
-                    DrawBuyButton(entry, GUILayoutUtility.GetRect(70f, RowHeight, GUILayout.Width(70f)));
+                    DrawBuyButton(entry, buyRect);
                 }
-                if (GUILayout.Button(new GUIContent("Remove", "Remove from your Gorilla Tag cart"), GUILayout.Width(70f)))
+                if (GUI.Button(new Rect(row.xMax - 76f, row.y + 20f, 70f, 24f), new GUIContent("REMOVE", "Take it out of your cart")))
                 {
                     entryToRemove = entry;
                 }
-                GUILayout.EndHorizontal();
             }
-            GUILayout.EndScrollView();
-            GUILayout.EndArea();
+            GUI.EndScrollView();
+
+            Rect summary = new Rect(area.x, area.yMax - summaryHeight, area.width, summaryHeight);
+            GUI.Box(summary, GUIContent.none);
+            GUI.Label(
+                new Rect(summary.x + 8f, summary.y + 5f, 250f, RowHeight),
+                "<color=#B3B3B3>Total</color>  " + GetCartTotal().ToString() + " SR",
+                balanceStyle);
+            if (shinyRocks >= 0)
+            {
+                int remaining = shinyRocks - GetCartTotal();
+                ColoredLabel(
+                    new Rect(summary.xMax - 308f, summary.y + 5f, 300f, RowHeight),
+                    remaining >= 0 ? "You'll have " + remaining.ToString() + " SR left" : "You need " + (-remaining).ToString() + " more Shiny Rocks",
+                    priceStyle,
+                    remaining >= 0 ? Good : Bad);
+            }
 
             if (entryToRemove != null)
             {
@@ -1432,11 +1785,13 @@ namespace ShopIndex
             if (controller == null || clear == null)
             {
                 Logger.LogWarning("[SI] Cannot clear cart: ClearCheckoutAndCart is unavailable.");
+                ShowStatus("Cart isn't working right now");
                 return;
             }
             clear.Invoke(controller, new object[] { false });
             UpdateShoppingCart();
             RefreshCartSnapshot();
+            ShowStatus("Cart cleared", 3f);
             Logger.LogInfo("[SI] Cleared Gorilla Tag cart.");
         }
 
@@ -1456,6 +1811,7 @@ namespace ShopIndex
             if (currentCart == null)
             {
                 Logger.LogWarning("[SI] Cannot add item to cart: currentCart is unavailable.");
+                ShowStatus("Cart isn't working right now");
                 return;
             }
             if (!IsInCart(entry))
@@ -1463,6 +1819,7 @@ namespace ShopIndex
                 currentCart.Add(entry.Source);
                 UpdateShoppingCart();
                 RefreshCartSnapshot();
+                ShowCartStatus("Added " + entry.DisplayName + " to cart");
                 Logger.LogInfo("[SI] Added item to Gorilla Tag cart: " + entry.Id + " (" + currentCart.Count + " items)");
             }
         }
@@ -1484,6 +1841,7 @@ namespace ShopIndex
                 currentCart.RemoveAt(index);
                 UpdateShoppingCart();
                 RefreshCartSnapshot();
+                ShowCartStatus("Took " + entry.DisplayName + " out of cart");
                 Logger.LogInfo("[SI] Removed item from Gorilla Tag cart: " + entry.Id + " (" + currentCart.Count + " items)");
                 break;
             }
@@ -1631,6 +1989,16 @@ namespace ShopIndex
             else
             {
                 filteredEntries.Sort((left, right) => StringComparer.OrdinalIgnoreCase.Compare(left.DisplayName, right.DisplayName));
+            }
+            if (bundlesOnly)
+            {
+                int steamDlcIndex = filteredEntries.FindIndex(bundle => bundle.IsSteamDlc);
+                if (steamDlcIndex > 0)
+                {
+                    Item steamDlc = filteredEntries[steamDlcIndex];
+                    filteredEntries.RemoveAt(steamDlcIndex);
+                    filteredEntries.Insert(0, steamDlc);
+                }
             }
             filtersDirty = false;
         }
@@ -1808,8 +2176,8 @@ namespace ShopIndex
             if (bundleLists.Count == 0 && manager == null)
             {
                 bundleCatalogStatus = manager == null && stand == null
-                    ? "Gorilla Tag's bundle store is not loaded in this area."
-                    : "Gorilla Tag has not loaded its bundle list yet.";
+                    ? "Bundles aren't loaded in this area"
+                    : "Bundles haven't loaded yet";
                 return;
             }
 
@@ -1866,7 +2234,7 @@ namespace ShopIndex
             }
 
             bundleCatalogStatus = loadedCount == 0
-                ? "No bundles are currently loaded by Gorilla Tag."
+                ? "No bundles loaded right now"
                 : string.Empty;
         }
 
@@ -1959,59 +2327,80 @@ namespace ShopIndex
                 float requestStartedAt = Time.realtimeSinceStartup;
                 yield return RefreshSteamDlcPrice();
                 float elapsed = Time.realtimeSinceStartup - requestStartedAt;
-                yield return new WaitForSecondsRealtime(Mathf.Max(0f, 10f - elapsed));
+                yield return new WaitForSecondsRealtime(Mathf.Max(0f, 5f - elapsed));
             }
         }
 
         private IEnumerator RefreshSteamDlcPrice()
         {
+            float startedAt = Time.realtimeSinceStartup;
+            ShowSteamDlcPrice("Checking...");
+
+            string priceText;
             using (UnityWebRequest request = UnityWebRequest.Get(EarlyAccessDlcApiUrl))
             {
-                request.timeout = 8;
+                request.timeout = 4;
                 yield return request.SendWebRequest();
-                if (request.result != UnityWebRequest.Result.Success)
-                {
-                    LogSteamDlcApiError(request.error);
-                    yield break;
-                }
+                priceText = ReadSteamDlcPrice(request);
+            }
 
-                SteamDlcApiResponse response;
-                try
-                {
-                    byte[] json = request.downloadHandler.data;
-                    using (var stream = new MemoryStream(json))
-                    {
-                        var serializer = new DataContractJsonSerializer(typeof(SteamDlcApiResponse));
-                        response = (SteamDlcApiResponse)serializer.ReadObject(stream);
-                    }
-                }
-                catch (Exception ex)
-                {
-                    LogSteamDlcApiError(ex.Message);
-                    yield break;
-                }
+            float remaining = 1f - (Time.realtimeSinceStartup - startedAt);
+            if (remaining > 0f)
+            {
+                yield return new WaitForSecondsRealtime(remaining);
+            }
+            ShowSteamDlcPrice(priceText);
+        }
 
-                SteamDlcApiResult app = response == null ? null : response.App;
-                if (app == null || !app.Success || app.Data == null)
-                {
-                    LogSteamDlcApiError("Steam returned no app details for DLC 1564750.");
-                    yield break;
-                }
+        private string ReadSteamDlcPrice(UnityWebRequest request)
+        {
+            if (request.result != UnityWebRequest.Result.Success)
+            {
+                LogSteamDlcApiError(request.error);
+                return "Can't reach Steam";
+            }
 
-                steamDlcLastError = string.Empty;
-                steamDlcIsFree = app.Data.IsFree;
-                steamDlcAvailable = steamDlcIsFree ||
-                    app.Data.PriceOverview != null && !string.IsNullOrWhiteSpace(app.Data.PriceOverview.FinalFormatted);
-                steamDlcPriceText = steamDlcIsFree ? "Free" :
-                    steamDlcAvailable ? app.Data.PriceOverview.FinalFormatted : "Delisted on Steam";
-
-                foreach (Item entry in entries.Where(item => item.IsSteamDlc))
+            SteamDlcApiResponse response;
+            try
+            {
+                byte[] json = request.downloadHandler.data;
+                using (var stream = new MemoryStream(json))
                 {
-                    entry.CanPurchase = steamDlcAvailable;
-                    entry.IsFree = steamDlcIsFree;
-                    entry.DisplayPrice = steamDlcPriceText;
+                    var serializer = new DataContractJsonSerializer(typeof(SteamDlcApiResponse));
+                    response = (SteamDlcApiResponse)serializer.ReadObject(stream);
                 }
-                filtersDirty = true;
+            }
+            catch (Exception ex)
+            {
+                LogSteamDlcApiError(ex.Message);
+                return "Can't reach Steam";
+            }
+
+            SteamDlcApiResult app = response == null ? null : response.App;
+            if (app == null || !app.Success || app.Data == null)
+            {
+                LogSteamDlcApiError("Steam returned no app details for DLC 1564750.");
+                steamDlcIsFree = false;
+                steamDlcAvailable = false;
+                return "Not for sale";
+            }
+
+            steamDlcLastError = string.Empty;
+            steamDlcIsFree = app.Data.IsFree;
+            steamDlcAvailable = steamDlcIsFree ||
+                app.Data.PriceOverview != null && !string.IsNullOrWhiteSpace(app.Data.PriceOverview.FinalFormatted);
+            return steamDlcIsFree ? "Free" :
+                steamDlcAvailable ? app.Data.PriceOverview.FinalFormatted : "Not for sale";
+        }
+
+        private void ShowSteamDlcPrice(string priceText)
+        {
+            steamDlcPriceText = priceText;
+            foreach (Item entry in entries.Where(item => item.IsSteamDlc))
+            {
+                entry.CanPurchase = steamDlcAvailable;
+                entry.IsFree = steamDlcIsFree;
+                entry.DisplayPrice = priceText;
             }
         }
 
